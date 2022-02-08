@@ -6,14 +6,20 @@ import os
 from datetime import datetime
 from openpyxl import load_workbook
 
+# get access key and secret key for the API
+# future updates: store access_key and secret_key in a separate file for better security
 access_key = "hkdvoPjvx3GIO7XaEPOG8gQj8txUjyQUjWQdfXKB"
 secret_key = "0nx6nJriz6BSnxlxOCzNxPrcy1LKaqBQS4wUFAQf"
 
+# create accessible upbit token using access_key and secret_key
 upbit_token = pyupbit.Upbit(access_key, secret_key)
 
+# calculates rsi value for input ohlc dataframe
+# ohlc: open, high, low, close value for certain ticker in specific time frame
+# period: number of candle bar to be used in rsi calculation
 def rsi(ohlc: pd.DataFrame, period: int = 14): 
     delta = ohlc["close"].diff() 
-    ups, downs = delta.copy(), delta.copy() 
+    ups, downs = delta.copy(), delta.copy()
     ups[ups < 0] = 0 
     downs[downs > 0] = 0 
 
@@ -25,75 +31,54 @@ def rsi(ohlc: pd.DataFrame, period: int = 14):
 def by_value(item):
     return item[1]
 
-def buy(ticker, cur_rsi, past_rsi):
-    if cur_rsi <= past_rsi+0.05:
-        return
 
-    now = datetime.now()
-    current_time = now.strftime("%H:%M:%S")
-    
-    cur_price = pyupbit.get_current_price(ticker)
-
+# buy certain ticker in designated amount (currently fixed 10000)
+def buy(ticker):
     upbit_token.buy_market_order(ticker, 10000)
 
-    new_data = [current_time , ticker, 'buy', cur_rsi, past_rsi, '10000', cur_price]
-    print(new_data)
-
-    wb = load_workbook('Records.xlsx')
-    ws = wb.worksheets[0]
-
-    ws.append(new_data)
-
-    wb.save('Records.xlsx')
-
+    # Record in bought_list
     bought_tickers = []
     with open('bought_list.txt') as f:
         bought_tickers = f.read().splitlines()
-
     if ticker not in bought_tickers:
         bought_tickers.append(ticker)
-
-    with open("bought_list.txt", 'w') as output:
+    with open('bought_list.txt', 'w') as output:
         for ticker in bought_tickers:
-            output.write(str(ticker) + '\n')
+            output.write(str(ticker) + '\n') 
 
-def sell(ticker, cur_rsi, past_rsi):
-    if cur_rsi >= past_rsi-0.05:
-        return
 
+# check whether certain ticker is in a buy condition
+    # buy if both past_rsi and cur_rsi are below 30 and 
+    # cur_rsi is greater than past_rsi
+def should_buy(ticker, cur_rsi, past_rsi):
+    return cur_rsi < 30 and past_rsi < 30 and cur_rsi > past_rsi * 1.01
+
+
+# sell certain ticker in designated amount
+def sell(ticker, selling_balance):
+    upbit_token.sell_market_order(ticker, selling_balance)
+
+    # remove ticker from bought_list.txt
     bought_tickers = []
     with open('bought_list.txt') as f:
         bought_tickers = f.read().splitlines()
-
-    if ticker not in bought_tickers:
-        return
-
-    now = datetime.now()
-    current_time = now.strftime("%H:%M:%S")
-
-    cur_price = pyupbit.get_current_price(ticker)
-    amount = upbit_token.get_balance(coin_name)
-
-    if not (cur_rsi > 80 or past_rsi > 80):
-        amount = amount / 2.0
-
-    upbit_token.sell_market_order(coin_name, amount)
-
-    new_data = [current_time , ticker, 'sell', cur_rsi, past_rsi, cur_price * amount, cur_price]
-
-    wb = load_workbook('Records.xlsx')
-    ws = wb.worksheets[0]
-
-    ws.append(new_data)
-
-    wb.save('Records.xlsx')
-
-    print(new_data)
-
-    bought_tickers.remove(coin_name)
-    with open("bought_list.txt", 'w') as output:
+    bought_tickers.remove(ticker)
+    with open('bought_list.txt', 'w') as output:
         for ticker in bought_tickers:
             output.write(str(ticker) + '\n')
+
+# sell if previous rsi value is greater 70 and 
+# current rsi is smaller than previous rsi
+def should_sell(ticker, cur_rsi, past_rsi):
+    if past_rsi > 70 and cur_rsi < past_rsi*0.99:
+        bought_tickers = []
+        with open('bought_list.txt') as f:
+            bought_tickers = f.read().splitlines()
+
+        if ticker in bought_tickers:
+            return True
+    
+    return False
 
 # getting korean tickers
 tickers = pyupbit.get_tickers()
@@ -108,19 +93,56 @@ for ticker in kr_tickers:
     past_rsi[ticker] = 50
 
 while True:
-    for coin_name in kr_tickers:
-        data = pyupbit.get_ohlcv(ticker = coin_name, interval="minute1")
+    for ticker in kr_tickers:
+        data = pyupbit.get_ohlcv(ticker = ticker, interval="minute1")
         cur_rsi = rsi(data, 14).iloc[-1]
         
-        if past_rsi[coin_name] < 30 and cur_rsi < 30:
-            print("Attept to buy " + str(coin_name) + " at cur_rsi: " + str(cur_rsi) + " and past_rsi: " + str(past_rsi[coin_name]))
-            buy(coin_name, cur_rsi, past_rsi = past_rsi[coin_name])
+        if should_buy(ticker, cur_rsi, past_rsi[ticker]):
+            try:
+                buy(ticker)
 
-        elif past_rsi[coin_name] > 70:
-            print("Attept to sell " + str(coin_name) + " at cur_rsi: " + str(cur_rsi) + " and past_rsi: " + str(past_rsi[coin_name]))
-            sell(coin_name, cur_rsi, past_rsi=past_rsi[coin_name])
+                current_time = datetime.now().strftime("%H:%M:%S")
+                cur_price_per_ticker = pyupbit.get_current_price(ticker)
+
+                new_data_row = [current_time, ticker, 'buy', cur_rsi, past_rsi, '10000', cur_price_per_ticker]
+
+                # Record the buy transaction
+                wb = load_workbook('Records.xlsx')
+                ws = wb.worksheet[0]
+                ws.append(new_data_row)
+                wb.save('Records.xlsx')
+
+            except:
+                print("error in purchasing " + ticker)
+
+        elif should_sell(ticker, cur_rsi, past_rsi[ticker]):
+            try:
+                current_time = datetime.now().strftime("%H:%M:%S")
+                cur_price_per_ticker = pyupbit.get_current_price(ticker)
+
+                ticker_balance = upbit_token.get_balance(ticker)
+                ticker_cur_price = pyupbit.get_current_price(ticker)
+
+                selling_amount_KRW = ticker_balance * ticker_cur_price
+                selling_balance = ticker_balance
+
+                if cur_rsi < 75 and selling_amount_KRW > 10000:
+                    selling_balance / 2
+                
+                sell(ticker, selling_balance)
+
+                new_data_row = [current_time, ticker, 'sell', cur_rsi, past_rsi, selling_balance*ticker_cur_price, cur_price_per_ticker]
+
+                # Record the buy transaction
+                wb = load_workbook('Records.xlsx')
+                ws = wb.worksheet[0]
+                ws.append(new_data_row)
+                wb.save('Records.xlsx')
+            
+            except:
+                print("error in selling " + ticker)
         
         else:
-            print("Current State " + str(coin_name) + " at cur_rsi: " + str(cur_rsi) + " and past_rsi: " + str(past_rsi[coin_name]))
+            print("Current State " + str(ticker) + " at cur_rsi: " + str(cur_rsi) + " and past_rsi: " + str(past_rsi[coin_name]))
         
-        past_rsi[coin_name] = cur_rsi
+        past_rsi[ticker] = cur_rsi
